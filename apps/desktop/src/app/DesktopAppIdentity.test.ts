@@ -153,7 +153,7 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/t3code-v2");
+        assert.equal(userDataPath, "/Users/alice/Library/Application Support/t3code-zroute");
       }),
       { legacyPathExists: true },
     ),
@@ -176,9 +176,9 @@ describe("DesktopAppIdentity", () => {
   );
 
   it.effect.each([
-    { stage: "Beta", environment: {} },
+    { stage: "zroute", environment: {} },
     {
-      stage: "Nightly",
+      stage: "zroute",
       environment: { appVersion: "0.0.43-nightly.20260929.2428" },
     },
     {
