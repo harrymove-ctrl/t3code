@@ -12,7 +12,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { piUsageReader } from "./usage.ts";
 import { makePiTextGeneration } from "./textGeneration.ts";
-import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
+import { makePiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./adapter.ts";
 import { ProviderDriverError } from "@t3tools/provider-core/server/errors";
 import {
   buildInitialPiProviderSnapshot,
@@ -41,9 +41,9 @@ import {
 
 const decodePiSettings = Schema.decodeSync(PiSettings);
 
-const DRIVER_KIND = ProviderDriverKind.make("pi");
+const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: DRIVER_KIND,
+  provider: PI_DRIVER_KIND,
   npmPackageName: "@earendil-works/pi-coding-agent",
   nativeUpdate: { args: ["update", "--self"] },
 });
@@ -57,13 +57,27 @@ export type PiDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path;
 
+/** Lets a wrapper driver (zroute) run Pi under its own identity and prepare state before checks. */
+export interface PiDriverOptions {
+  readonly driverKind?: ProviderDriverKind;
+  /** Default display name when the instance has none. */
+  readonly displayName?: string;
+  /** Runs around each status check; may short-circuit or amend the draft. */
+  readonly wrapCheck?: (
+    check: Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner>,
+  ) => Effect.Effect<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner>;
+}
+
 const withInstanceIdentity =
-  (input: {
-    readonly instanceId: ProviderInstance["instanceId"];
-    readonly displayName: string | undefined;
-    readonly accentColor: string | undefined;
-    readonly continuationGroupKey: string;
-  }) =>
+  (
+    DRIVER_KIND: ProviderDriverKind,
+    input: {
+      readonly instanceId: ProviderInstance["instanceId"];
+      readonly displayName: string | undefined;
+      readonly accentColor: string | undefined;
+      readonly continuationGroupKey: string;
+    },
+  ) =>
   (snapshot: ServerProviderDraft): ServerProvider => ({
     ...snapshot,
     instanceId: input.instanceId,
@@ -73,146 +87,156 @@ const withInstanceIdentity =
     continuation: { groupKey: input.continuationGroupKey },
   });
 
-export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv, Path.Path> = {
-  driverKind: DRIVER_KIND,
-  metadata: {
-    displayName: "Pi",
-    supportsMultipleInstances: true,
-  },
-  usage: piUsageReader,
-  configSchema: PiSettings,
-  defaultConfig: (): PiSettings => decodePiSettings({}),
-  create: Effect.fn("PiDriver.create")(function* ({
-    instanceId,
-    displayName,
-    accentColor,
-    environment,
-    enabled,
-    config,
-  }) {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const fileSystem = yield* FileSystem.FileSystem;
-    const pathService = yield* Path.Path;
-    const httpClient = yield* HttpClient.HttpClient;
-    const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-    const host = yield* ProviderHost.ProviderHost;
-    const { cwd } = host.paths;
-    const processEnv = yield* mergeProviderInstanceEnvironment(environment);
-    const continuationIdentity = defaultProviderContinuationIdentity({
-      driverKind: DRIVER_KIND,
+export const makePiDriver = (
+  options: PiDriverOptions = {},
+): ProviderDriver<PiSettings, PiDriverEnv, Path.Path> => {
+  const DRIVER_KIND = options.driverKind ?? PI_DRIVER_KIND;
+  const PiAdapterV2Driver = makePiAdapterV2Driver(DRIVER_KIND);
+  return {
+    driverKind: DRIVER_KIND,
+    metadata: {
+      displayName: options.displayName ?? "Pi",
+      supportsMultipleInstances: true,
+    },
+    usage: piUsageReader,
+    configSchema: PiSettings,
+    defaultConfig: (): PiSettings => decodePiSettings({}),
+    create: Effect.fn("PiDriver.create")(function* ({
       instanceId,
-    });
-    const stampIdentity = withInstanceIdentity({
-      instanceId,
-      displayName,
-      accentColor,
-      continuationGroupKey: continuationIdentity.continuationKey,
-    });
-    const effectiveConfig = { ...config, enabled } satisfies PiSettings;
-    const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-      resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(Path.Path, pathService),
-      ),
-    );
-
-    const orchestrationAdapter = yield* PiAdapterV2Driver.create({
-      instanceId,
-      displayName,
+      displayName: configuredDisplayName,
       accentColor,
       environment,
       enabled,
       config,
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: DRIVER_KIND,
-            instanceId,
-            detail: "Failed to build Pi orchestration adapter.",
-            cause,
-          }),
-      ),
-    );
-    const textGeneration = yield* makePiTextGeneration(effectiveConfig, processEnv);
-
-    const checkProvider = checkPiProviderStatus(effectiveConfig, processEnv, cwd).pipe(
-      Effect.map(stampIdentity),
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
-
-    const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
-    const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({
-      resolveMaintenance,
-      getSettings: snapshotSettings.getSettings,
-      streamSettings: snapshotSettings.streamSettings,
-      haveSettingsChanged: haveProviderSnapshotSettingsChanged,
-      initialSnapshot: (settings) =>
-        buildInitialPiProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
-      checkProvider,
-      enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
-        resolveMaintenance().pipe(
-          Effect.flatMap((maintenanceCapabilities) =>
-            enrichPiSnapshot({
-              snapshot: currentSnapshot,
-              maintenanceCapabilities,
-              enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-              publishSnapshot,
-            }),
-          ),
-          Effect.provideService(HttpClient.HttpClient, httpClient),
-          Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+    }) {
+      const displayName = configuredDisplayName ?? options.displayName;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const httpClient = yield* HttpClient.HttpClient;
+      const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
+      const host = yield* ProviderHost.ProviderHost;
+      const { cwd } = host.paths;
+      const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+      const continuationIdentity = defaultProviderContinuationIdentity({
+        driverKind: DRIVER_KIND,
+        instanceId,
+      });
+      const stampIdentity = withInstanceIdentity(DRIVER_KIND, {
+        instanceId,
+        displayName,
+        accentColor,
+        continuationGroupKey: continuationIdentity.continuationKey,
+      });
+      const effectiveConfig = { ...config, enabled } satisfies PiSettings;
+      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
+        resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, pathService),
         ),
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: DRIVER_KIND,
-            instanceId,
-            detail: "Failed to build Pi snapshot.",
-            cause,
-          }),
-      ),
-    );
+      );
 
-    return {
-      instanceId,
-      driverKind: DRIVER_KIND,
-      continuationIdentity,
-      displayName,
-      accentColor,
-      enabled,
-      snapshot,
-      snapshotForCwd: (workspaceCwd) =>
-        !effectiveConfig.enabled
-          ? snapshot.getSnapshot
-          : Effect.all([
-              snapshot.getSnapshot,
-              discoverPiCommandsForCwd(effectiveConfig, processEnv, workspaceCwd).pipe(
-                Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderDriverError({
-                      driver: DRIVER_KIND,
-                      instanceId,
-                      detail: "Failed to discover Pi workspace commands.",
-                      cause,
-                    }),
-                ),
-              ),
-            ]).pipe(
-              Effect.map(([machineSnapshot, commands]) => ({
-                ...machineSnapshot,
-                ...commands,
-                slashCommandsPending: false,
-              })),
+      const orchestrationAdapter = yield* PiAdapterV2Driver.create({
+        instanceId,
+        displayName,
+        accentColor,
+        environment,
+        enabled,
+        config,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to build Pi orchestration adapter.",
+              cause,
+            }),
+        ),
+      );
+      const textGeneration = yield* makePiTextGeneration(effectiveConfig, processEnv);
+
+      const baseCheck = checkPiProviderStatus(effectiveConfig, processEnv, cwd);
+      const checkProvider = (options.wrapCheck ? options.wrapCheck(baseCheck) : baseCheck).pipe(
+        Effect.map(stampIdentity),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+
+      const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
+      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<PiSettings>>({
+        resolveMaintenance,
+        getSettings: snapshotSettings.getSettings,
+        streamSettings: snapshotSettings.streamSettings,
+        haveSettingsChanged: haveProviderSnapshotSettingsChanged,
+        initialSnapshot: (settings) =>
+          buildInitialPiProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
+        checkProvider,
+        enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
+          resolveMaintenance().pipe(
+            Effect.flatMap((maintenanceCapabilities) =>
+              enrichPiSnapshot({
+                snapshot: currentSnapshot,
+                maintenanceCapabilities,
+                enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
+                publishSnapshot,
+              }),
             ),
-      orchestrationAdapter,
-      textGeneration,
-    } satisfies ProviderInstance;
-  }),
+            Effect.provideService(HttpClient.HttpClient, httpClient),
+            Effect.provideService(ProviderLatestVersions.ProviderLatestVersions, latestVersions),
+          ),
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Failed to build Pi snapshot.",
+              cause,
+            }),
+        ),
+      );
+
+      return {
+        instanceId,
+        driverKind: DRIVER_KIND,
+        continuationIdentity,
+        displayName,
+        accentColor,
+        enabled,
+        snapshot,
+        snapshotForCwd: (workspaceCwd) =>
+          !effectiveConfig.enabled
+            ? snapshot.getSnapshot
+            : Effect.all([
+                snapshot.getSnapshot,
+                discoverPiCommandsForCwd(effectiveConfig, processEnv, workspaceCwd).pipe(
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: DRIVER_KIND,
+                        instanceId,
+                        detail: "Failed to discover Pi workspace commands.",
+                        cause,
+                      }),
+                  ),
+                ),
+              ]).pipe(
+                Effect.map(([machineSnapshot, commands]) => ({
+                  ...machineSnapshot,
+                  ...commands,
+                  slashCommandsPending: false,
+                })),
+              ),
+        orchestrationAdapter,
+        textGeneration,
+      } satisfies ProviderInstance;
+    }),
+  };
 };
+
+export const PiDriver = makePiDriver();
