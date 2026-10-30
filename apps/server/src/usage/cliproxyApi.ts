@@ -117,6 +117,11 @@ const describeManagementFailure = (error: unknown) => {
     if (reason._tag === "StatusCodeError") {
       return `The hub answered with HTTP ${reason.response.status}.`;
     }
+    if (reason._tag === "DecodeError") {
+      // Status was OK but the body was not JSON, typically a web page. Never echo the body.
+      const contentType = reason.response.headers["content-type"]?.split(";")[0]?.trim();
+      return `The hub answered with HTTP ${reason.response.status} but not with JSON (${contentType || "unknown content type"}). Point the URL at the CLIProxyAPI host itself, for example https://hub.example.com:8317, not at a web page or script.`;
+    }
     const code = reason._tag === "TransportError" ? nodeErrorCode(reason.cause) : undefined;
     if (code !== undefined && UNTRUSTED_CERTIFICATE_CODES.has(code)) {
       return `The hub's TLS certificate is not trusted (${code}). If it comes from a private CA, add that CA to NODE_EXTRA_CA_CERTS.`;

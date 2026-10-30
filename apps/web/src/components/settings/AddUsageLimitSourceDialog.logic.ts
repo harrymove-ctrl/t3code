@@ -22,3 +22,23 @@ export function sourceIdFromUrl(
   }
   return UsageLimitSourceId.make(id);
 }
+
+/** Tidy a typed hub URL. A path is kept (hubs can sit behind a proxy prefix) but flagged. */
+export function normalizeHubUrl(input: string): { url: string; warning?: string } {
+  let url = input.trim();
+  if (url.length === 0) return { url };
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = `https://${url}`;
+  url = url.replace(/\/+$/, "");
+  let pathname = "/";
+  try {
+    pathname = new URL(url).pathname;
+  } catch {}
+  if (pathname !== "/") {
+    return {
+      url,
+      warning:
+        "This looks like a page or script path. Hubs are usually just the origin, for example https://api.example.com.",
+    };
+  }
+  return { url };
+}

@@ -1,4 +1,4 @@
-import type { EnvironmentId, UnifiedSettings } from "@t3tools/contracts";
+import type { EnvironmentId, UnifiedSettings, UsageLimitSourceSnapshot } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -41,8 +41,9 @@ export function UsageProviderSettings({
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
-  const platform = useAtomValue(serverEnvironment.configValueAtom(environmentId))?.environment
-    .platform;
+  const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const platform = config?.environment.platform;
+  const snapshots = config?.usageLimitSources;
   const [adding, setAdding] = useState(false);
   const [updatingCursor, setUpdatingCursor] = useState(false);
   const entries = Object.entries(sources);
@@ -92,6 +93,7 @@ export function UsageProviderSettings({
         ) : (
           entries.map(([id, source]) => {
             const label = source.label?.trim() || source.url;
+            const snapshot = snapshots?.find((candidate) => candidate.id === id);
             return (
               <SettingsRow
                 key={id}
@@ -102,6 +104,7 @@ export function UsageProviderSettings({
                     {label !== source.url ? ` · ${source.url}` : ""}
                   </span>
                 }
+                status={source.enabled ? <HubStatus snapshot={snapshot} /> : null}
                 control={
                   !readOnly ? (
                     <RemoveUsageProviderButton
@@ -125,6 +128,23 @@ export function UsageProviderSettings({
         />
       ) : null}
     </>
+  );
+}
+
+function HubStatus({ snapshot }: { readonly snapshot: UsageLimitSourceSnapshot | undefined }) {
+  if (!snapshot) return <span className="break-words">Checking…</span>;
+  if (snapshot.error !== undefined) {
+    return <span className="break-words text-destructive-foreground">{snapshot.error}</span>;
+  }
+  const count = snapshot.accounts.length;
+  const checked = new Date(snapshot.checkedAt);
+  const time = Number.isNaN(checked.getTime())
+    ? "just now"
+    : checked.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return (
+    <span className="break-words">
+      {count} {count === 1 ? "account" : "accounts"} · checked {time}
+    </span>
   );
 }
 

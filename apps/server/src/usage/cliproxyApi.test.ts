@@ -172,6 +172,30 @@ describe("CLIProxyAPI hub failures", () => {
     }),
   );
 
+  it.effect("explains a non-JSON answer without echoing the body", () =>
+    Effect.gen(function* () {
+      const test = HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            new Response("<!doctype html><p>management-secret page</p>", {
+              headers: { "content-type": "text/html; charset=utf-8" },
+            }),
+          ),
+        ),
+      );
+      const api = yield* makeCliproxyApi.pipe(
+        Effect.provideService(HttpClient.HttpClient, test),
+        Effect.provide(NodeCrypto.layer),
+      );
+      const error = yield* Effect.flip(api.readAccounts(config));
+      expect(error.detail).toContain("not with JSON");
+      expect(error.detail).toContain("text/html");
+      expect(error.detail).not.toContain("doctype");
+      expect(error.detail).not.toContain("management-secret");
+    }),
+  );
+
   it.effect("names the status, not the body, when the hub rejects the request", () =>
     Effect.gen(function* () {
       const test = HttpClient.make((request) =>

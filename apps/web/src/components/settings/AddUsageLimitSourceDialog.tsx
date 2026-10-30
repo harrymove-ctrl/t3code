@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { sourceIdFromUrl } from "./AddUsageLimitSourceDialog.logic";
+import { normalizeHubUrl, sourceIdFromUrl } from "./AddUsageLimitSourceDialog.logic";
 import { SecretInput } from "./SecretInput";
 import { Label } from "../ui/label";
 
@@ -36,6 +36,7 @@ export function AddUsageLimitSourceDialog({
   const [url, setUrl] = useState("");
   const [managementKey, setManagementKey] = useState("");
   const trimmedUrl = url.trim();
+  const normalized = normalizeHubUrl(url);
   const canSave = trimmedUrl.length > 0 && managementKey.trim().length > 0;
 
   const reset = () => {
@@ -46,13 +47,13 @@ export function AddUsageLimitSourceDialog({
 
   const save = () => {
     if (!canSave) return;
-    const id = sourceIdFromUrl(trimmedUrl, sources);
+    const id = sourceIdFromUrl(normalized.url, sources);
     updateSettings({
       usageLimitSources: {
         [id]: {
           kind: "cliproxy",
           ...(label.trim() ? { label: label.trim() } : {}),
-          url: trimmedUrl,
+          url: normalized.url,
           managementKey: managementKey.trim(),
           enabled: true,
         },
@@ -95,6 +96,9 @@ export function AddUsageLimitSourceDialog({
                 onChange={(event) => setUrl(event.target.value)}
                 autoFocus
               />
+              {normalized.warning ? (
+                <p className="text-xs text-warning-foreground">{normalized.warning}</p>
+              ) : null}
             </div>
             <div className="grid gap-1.5">
               <Label htmlFor="usage-source-key">Management key</Label>
