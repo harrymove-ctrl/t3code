@@ -185,6 +185,8 @@ export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /** Wrapper drivers (zroute) run Pi under their own driver kind; defaults to "pi". */
+  readonly driverKind?: ProviderDriverKind;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -297,11 +299,12 @@ function piToolOutput(result: unknown, toolName: string): unknown {
   };
 }
 
-function providerRef(
+function makeProviderRef(
+  driver: ProviderDriverKind,
   nativeId: string,
   strength: "strong" | "weak" = "strong",
 ): OrchestrationV2ProviderRef {
-  return { driver: PI_PROVIDER, nativeId, strength };
+  return { driver, nativeId, strength };
 }
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -418,17 +421,20 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const { continuationRequests } = options;
+  const driverKind = options.driverKind ?? PI_PROVIDER;
+  const providerRef = (nativeId: string, strength: "strong" | "weak" = "strong") =>
+    makeProviderRef(driverKind, nativeId, strength);
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
-      driver: PI_PROVIDER,
+      driver: driverKind,
       detail,
       ...(payload === undefined ? {} : { payload }),
     });
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
-    driver: PI_PROVIDER,
+    driver: driverKind,
     getCapabilities: Effect.fn("PiAdapter.getCapabilities")(function () {
       return Effect.succeed(PiProviderCapabilitiesV2);
     }),
@@ -447,7 +453,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           Effect.mapError(
             (cause) =>
               new ProviderAdapter.ProviderAdapterOpenSessionError({
-                driver: PI_PROVIDER,
+                driver: driverKind,
                 providerSessionId: input.providerSessionId,
                 cause,
               }),
@@ -490,7 +496,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterOpenSessionError({
-              driver: PI_PROVIDER,
+              driver: driverKind,
               providerSessionId: input.providerSessionId,
               cause,
             }),
@@ -506,7 +512,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const now = yield* DateTime.now;
       let sessionEntity: OrchestrationV2ProviderSession = {
         id: input.providerSessionId,
-        driver: PI_PROVIDER,
+        driver: driverKind,
         providerInstanceId: options.instanceId,
         status: "ready",
         cwd,
@@ -587,7 +593,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           sessionEntity = { ...sessionEntity, status, lastError, updatedAt };
           yield* emit({
             type: "provider_session.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerSession: sessionEntity,
           });
         });
@@ -603,7 +609,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           state.providerThread = { ...state.providerThread, ...patch, updatedAt };
           yield* emit({
             type: "provider_thread.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerThread: state.providerThread,
             ...(retainedNativeTurnIds === undefined ? {} : { retainedNativeTurnIds }),
           });
@@ -708,7 +714,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const updatedAt = yield* DateTime.now;
           yield* emit({
             type: "provider_turn.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             threadId: turn.turnInput.threadId,
             providerTurn: {
               ...turn.providerTurn,
@@ -731,13 +737,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         updatedAt: DateTime.Utc,
       ) => ({
         id: idAllocator.derive.turnItemFromProviderItem({
-          driver: PI_PROVIDER,
+          driver: driverKind,
           nativeItemId,
         }),
         threadId: turn.turnInput.threadId,
         runId: turn.turnInput.runId,
         nodeId: idAllocator.derive.nodeFromProviderItem({
-          driver: PI_PROVIDER,
+          driver: driverKind,
           nativeItemId,
         }),
         providerThreadId: turn.turnInput.providerThread.id,
@@ -759,10 +765,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ) =>
         emit({
           type: "node.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           node: {
             id: idAllocator.derive.nodeFromProviderItem({
-              driver: PI_PROVIDER,
+              driver: driverKind,
               nativeItemId,
             }),
             threadId: turn.turnInput.threadId,
@@ -790,9 +796,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ) {
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           turnItem: makeProviderRetryTurnItem({
-            driver: PI_PROVIDER,
+            driver: driverKind,
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
             nodeId: turn.turnInput.rootNodeId,
@@ -833,14 +839,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         );
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           turnItem: {
             ...baseItemFields(turn, compaction.nativeItemId, compaction.startedAt, emittedAt),
             status,
             title: compactionTitle(status),
             completedAt,
             type: "compaction",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             ...details,
           },
         });
@@ -865,12 +871,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           );
           if (item.kind === "assistant_message") {
             const messageId = idAllocator.derive.messageFromProviderItem({
-              driver: PI_PROVIDER,
+              driver: driverKind,
               nativeItemId: item.nativeItemId,
             });
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               turnItem: {
                 ...base,
                 status: streaming ? "running" : "completed",
@@ -884,13 +890,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             });
             yield* emit({
               type: "message.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               message: {
                 id: messageId,
                 threadId: turn.turnInput.threadId,
                 runId: turn.turnInput.runId,
                 nodeId: idAllocator.derive.nodeFromProviderItem({
-                  driver: PI_PROVIDER,
+                  driver: driverKind,
                   nativeItemId: item.nativeItemId,
                 }),
                 role: "assistant",
@@ -907,7 +913,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             turnItem: {
               ...base,
               status: streaming ? "running" : "completed",
@@ -1019,7 +1025,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             recordNumber(recordField(resultRecord, "details"), "exitCode");
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             turnItem: {
               ...shared,
               title: toolName,
@@ -1040,7 +1046,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const newStr = toolName === "write" ? recordString(args, "content") : undefined;
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               turnItem: {
                 ...shared,
                 title: toolName,
@@ -1056,7 +1062,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const output = piToolOutput(resultRecord, toolName);
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           turnItem: {
             ...shared,
             title: toolName,
@@ -1082,7 +1088,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (!Array.isArray(results)) return;
         const emittedAt = yield* DateTime.now;
         const parentNodeId = idAllocator.derive.nodeFromProviderItem({
-          driver: PI_PROVIDER,
+          driver: driverKind,
           nativeItemId: toolCallId,
         });
         for (const [index, result] of results.entries()) {
@@ -1091,7 +1097,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           if (agent === undefined || task === undefined) continue;
           const nativeTaskId = `${toolCallId}:subagent:${recordNumber(result, "step") ?? index}`;
           const subagentId = idAllocator.derive.nodeFromProviderItem({
-            driver: PI_PROVIDER,
+            driver: driverKind,
             nativeItemId: nativeTaskId,
           });
           const startedAt = turn.toolStartedAt.get(nativeTaskId) ?? emittedAt;
@@ -1116,7 +1122,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const resultText = finished && outputText.length > 0 ? outputText.slice(0, 10_000) : null;
           yield* emit({
             type: "subagent.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             subagent: {
               id: subagentId,
               threadId: turn.turnInput.threadId,
@@ -1124,7 +1130,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               parentNodeId,
               origin: "provider_native",
               createdBy: "agent",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               providerInstanceId: options.instanceId,
               providerThreadId: turn.turnInput.providerThread.id,
               childThreadId: null,
@@ -1142,7 +1148,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           });
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             turnItem: {
               ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
               status,
@@ -1151,7 +1157,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               type: "subagent",
               subagentId,
               origin: "provider_native",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               providerInstanceId: options.instanceId,
               childThreadId: null,
               prompt: task,
@@ -1181,18 +1187,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         };
         yield* emit({
           type: "runtime_request.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           threadId: pending.node.threadId,
           runtimeRequest: pending.runtimeRequest,
         });
         yield* emit({
           type: "node.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           node: { ...pending.node, status: "cancelled", completedAt: resolvedAt },
         });
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           turnItem: {
             ...pending.turnItem,
             status: "cancelled",
@@ -1226,7 +1232,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             turnItem: {
               ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
               status: "completed",
@@ -1268,7 +1274,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ? null
             : DateTime.toEpochMillis(createdAt) + Math.max(0, timeout);
         const requestId = yield* idAllocator.allocate.runtimeRequest({
-          driver: PI_PROVIDER,
+          driver: driverKind,
           ...(turn === null ? {} : { providerTurnId: turn.providerTurn.id }),
           nativeRequestId,
         });
@@ -1351,12 +1357,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         pendingPrompts.set(String(requestId), pending);
         yield* emit({
           type: "runtime_request.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           threadId,
           runtimeRequest,
         });
-        yield* emit({ type: "node.updated", driver: PI_PROVIDER, node });
-        yield* emit({ type: "turn_item.updated", driver: PI_PROVIDER, turnItem });
+        yield* emit({ type: "node.updated", driver: driverKind, node });
+        yield* emit({ type: "turn_item.updated", driver: driverKind, turnItem });
         if (expiresAt !== null) {
           const now = yield* DateTime.now;
           pending.expirationFiber = yield* Effect.sleep(
@@ -1401,7 +1407,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         yield* emitItemNode(turn, nativeItemId, "system", "failed", emittedAt, emittedAt);
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           turnItem: {
             ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
             status: "failed",
@@ -1489,7 +1495,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
         yield* emit({
           type: "provider_turn.updated",
-          driver: PI_PROVIDER,
+          driver: driverKind,
           threadId: turn.turnInput.threadId,
           providerTurn: {
             ...turn.providerTurn,
@@ -1530,7 +1536,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           } else {
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               turnItem: {
                 ...baseItemFields(turn, failureItemId, completedAt, completedAt),
                 status: "failed",
@@ -1543,7 +1549,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
           yield* emit({
             type: "turn.terminal",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
             runOrdinal: turn.turnInput.runOrdinal,
@@ -1561,7 +1567,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         } else {
           yield* emit({
             type: "turn.terminal",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
             runOrdinal: turn.turnInput.runOrdinal,
@@ -1653,7 +1659,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 .offer({
                   threadId: state.providerThread.appThreadId,
                   providerThreadId: state.providerThread.id,
-                  driver: PI_PROVIDER,
+                  driver: driverKind,
                   detail: null,
                   delivery: "adapter_buffered",
                   dispatchIfCurrent: (dispatch) =>
@@ -2103,7 +2109,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 yield* Queue.fail(
                   events,
                   new ProviderAdapter.ProviderAdapterEventStreamError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerSessionId: input.providerSessionId,
                     cause,
                   }),
@@ -2208,10 +2214,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               }
             : {
                 id: idAllocator.derive.providerThread({
-                  driver: PI_PROVIDER,
+                  driver: driverKind,
                   nativeThreadId: nativeId,
                 }),
-                driver: PI_PROVIDER,
+                driver: driverKind,
                 providerInstanceId: options.instanceId,
                 providerSessionId: input.providerSessionId,
                 appThreadId: threadInput.threadId,
@@ -2236,7 +2242,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerThread,
           });
         return providerThread;
@@ -2253,7 +2259,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             sessionEntity = { ...sessionEntity, model: PI_INHERIT_MODEL_SLUG, updatedAt };
             yield* emit({
               type: "provider_session.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               providerSession: sessionEntity,
             });
           }
@@ -2284,7 +2290,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           sessionEntity = { ...sessionEntity, model: modelSelection.model, updatedAt };
           yield* emit({
             type: "provider_session.updated",
-            driver: PI_PROVIDER,
+            driver: driverKind,
             providerSession: sessionEntity,
           });
         }
@@ -2326,7 +2332,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
         instanceId: options.instanceId,
-        driver: PI_PROVIDER,
+        driver: driverKind,
         providerSessionId: input.providerSessionId,
         get providerSession() {
           return sessionEntity;
@@ -2352,7 +2358,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                  driver: PI_PROVIDER,
+                  driver: driverKind,
                   threadId: threadInput.threadId,
                   cause,
                 }),
@@ -2369,7 +2375,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterResumeThreadError({
-                  driver: PI_PROVIDER,
+                  driver: driverKind,
                   providerSessionId: input.providerSessionId,
                   providerThreadId: threadInput.providerThread.id,
                   cause,
@@ -2391,7 +2397,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }
             if (state.activeTurn !== null) {
               return yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                driver: PI_PROVIDER,
+                driver: driverKind,
                 detail: `Pi provider thread ${turnInput.providerThread.id} already has an active turn`,
                 reason: "previous_turn_active",
               });
@@ -2431,7 +2437,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
               id: idAllocator.derive.providerTurn({
-                driver: PI_PROVIDER,
+                driver: driverKind,
                 nativeTurnId: syntheticNativeTurnId,
               }),
               providerThreadId: turnInput.providerThread.id,
@@ -2511,7 +2517,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               }
               yield* emit({
                 type: "provider_turn.updated",
-                driver: PI_PROVIDER,
+                driver: driverKind,
                 threadId: turnInput.threadId,
                 providerTurn,
               });
@@ -2554,7 +2560,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterTurnStartError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     threadId: turnInput.threadId,
                     providerThreadId: turnInput.providerThread.id,
                     runId: turnInput.runId,
@@ -2612,7 +2618,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterSteerRunError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerThreadId: steerInput.providerThread.id,
                     providerTurnId: steerInput.providerTurnId,
                     cause,
@@ -2663,7 +2669,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterInterruptError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerThreadId: interruptInput.providerThread.id,
                     providerTurnId: interruptInput.providerTurnId,
                     cause,
@@ -2709,18 +2715,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             };
             yield* emit({
               type: "runtime_request.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               threadId: pending.node.threadId,
               runtimeRequest: pending.runtimeRequest,
             });
             yield* emit({
               type: "node.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               node: { ...pending.node, status: "completed", completedAt: resolvedAt },
             });
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver: driverKind,
               turnItem: {
                 ...pending.turnItem,
                 status: "completed",
@@ -2735,7 +2741,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     requestId: requestInput.requestId,
                     cause,
                   }),
@@ -2770,7 +2776,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 return [
                   {
                     id: idAllocator.derive.messageFromProviderItem({
-                      driver: PI_PROVIDER,
+                      driver: driverKind,
                       nativeItemId: `${wantedNativeId}:snapshot-message:${index}`,
                     }),
                     threadId,
@@ -2800,7 +2806,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerThreadId: snapshotInput.providerThread.id,
                     cause,
                   }),
@@ -2926,7 +2932,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterRollbackThreadError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerThreadId: rollbackInput.providerThread.id,
                     checkpointId: rollbackInput.target.checkpointId,
                     cause,
@@ -3014,7 +3020,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 existingProviderThread: {
                   ...source,
                   id: idAllocator.derive.providerThread({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     nativeThreadId: nativeId,
                   }),
                   appThreadId: forkInput.targetThreadId,
@@ -3045,7 +3051,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               Effect.mapError(
                 (cause) =>
                   new ProviderAdapter.ProviderAdapterForkThreadError({
-                    driver: PI_PROVIDER,
+                    driver: driverKind,
                     providerThreadId: forkInput.sourceProviderThread.id,
                     cause,
                   }),
@@ -3308,8 +3314,10 @@ export type PiAdapterV2DriverEnv =
   | McpProviderSessions.McpProviderSessions
   | ProviderHost.ProviderHost;
 
-export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2DriverEnv> = {
-  driverKind: PI_DRIVER_KIND,
+export const makePiAdapterV2Driver = (
+  driverKind: ProviderDriverKind = PI_DRIVER_KIND,
+): ProviderAdapterDriver<PiSettings, PiAdapterV2DriverEnv> => ({
+  driverKind,
   configSchema: PiSettings,
   defaultConfig: (): PiSettings => DEFAULT_PI_SETTINGS,
   create: Effect.fn("PiAdapterV2Driver.create")(
@@ -3320,6 +3328,7 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        driverKind,
         continuationRequests,
       });
     },
@@ -3328,7 +3337,7 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         Effect.mapError(
           (cause) =>
             new ProviderAdapterDriverCreateError({
-              driver: PI_DRIVER_KIND,
+              driver: driverKind,
               instanceId: input.instanceId,
               detail: "Failed to create Pi adapter.",
               cause,
@@ -3336,4 +3345,6 @@ export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2Dri
         ),
       ),
   ),
-};
+});
+
+export const PiAdapterV2Driver = makePiAdapterV2Driver();
