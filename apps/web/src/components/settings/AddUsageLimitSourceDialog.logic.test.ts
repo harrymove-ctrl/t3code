@@ -2,7 +2,7 @@ import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@t3tools/contracts
 import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
 import { describe, expect, it } from "vite-plus/test";
 
-import { sourceIdFromUrl } from "./AddUsageLimitSourceDialog.logic";
+import { normalizeHubUrl, sourceIdFromUrl } from "./AddUsageLimitSourceDialog.logic";
 
 describe("adding usage limit sources", () => {
   it.each([
@@ -57,5 +57,27 @@ describe("adding usage limit sources", () => {
         enabled: true,
       },
     ]);
+  });
+});
+
+describe("normalizeHubUrl", () => {
+  it("adds https and leaves a bare host without a warning", () => {
+    expect(normalizeHubUrl("api.example.com")).toEqual({ url: "https://api.example.com" });
+  });
+
+  it("warns about a script path but keeps it", () => {
+    const result = normalizeHubUrl("https://dev.zroute.ai/install.sh");
+    expect(result.url).toBe("https://dev.zroute.ai/install.sh");
+    expect(result.warning).toContain("page or script path");
+  });
+
+  it("strips a trailing slash", () => {
+    expect(normalizeHubUrl("http://127.0.0.1:18517/")).toEqual({ url: "http://127.0.0.1:18517" });
+  });
+
+  it("keeps a reverse-proxy prefix and warns", () => {
+    const result = normalizeHubUrl("https://proxy.test:8318/hub-a");
+    expect(result.url).toBe("https://proxy.test:8318/hub-a");
+    expect(result.warning).toBeDefined();
   });
 });
