@@ -53,6 +53,8 @@ import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
   type EnvironmentThreadState,
   type EnvironmentThreadStatus,
+  MISSING_THREAD_RETRY_DELAYS_MILLIS,
+  resolveMissingThreadSnapshot,
 } from "./threadState.ts";
 
 function statusWithoutLiveData(
@@ -253,6 +255,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   };
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
+  // Whether this client has ever seen the thread exist. A 404 only means "deleted" after that.
+  const everLoaded = yield* Ref.make(Option.isSome(initialState.data));
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -402,6 +406,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   ) {
     const waiting = yield* Ref.get(awaitingCompletion);
     const sequence = yield* SubscriptionRef.get(lastSequence);
+    yield* Ref.set(everLoaded, true);
     // Atomic with concurrent history meta updates: never get-then-set the whole
     // state when only the projection changes. Bounded installs pass history so
     // projection + cursor persist together in one enqueue.
@@ -965,8 +970,26 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               }),
             ),
           );
-          const httpResult: ThreadSnapshotLoader.ThreadSnapshotLoadResult =
+          let httpResult: ThreadSnapshotLoader.ThreadSnapshotLoadResult =
             yield* snapshotLoader.load(prepared, threadId);
+          // A thread launched moments ago may not exist on the server yet, so a 404 is not
+          // proof of deletion until this client has seen the thread.
+          for (let attempt = 1; httpResult._tag === "missing"; attempt++) {
+            const resolution = resolveMissingThreadSnapshot({
+              everLoaded: yield* Ref.get(everLoaded),
+              attempt,
+            });
+            if (resolution === "deleted") {
+              yield* setDeleted();
+              return yield* Effect.never;
+            }
+            if (resolution === "socket") {
+              httpResult = { _tag: "unavailable" };
+              break;
+            }
+            yield* Effect.sleep(MISSING_THREAD_RETRY_DELAYS_MILLIS[attempt - 1] ?? 0);
+            httpResult = yield* snapshotLoader.load(prepared, threadId);
+          }
           switch (httpResult._tag) {
             case "present": {
               if (canLoadHistory && httpResult.history !== undefined) {
@@ -996,10 +1019,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               current = yield* SubscriptionRef.get(state);
               break;
             }
-            case "missing": {
-              yield* setDeleted();
-              return yield* Effect.never;
-            }
+            // A `missing` result was resolved in the loop above, so only a socket fallback
+            // reaches `unavailable`.
             case "unavailable": {
               break;
             }
