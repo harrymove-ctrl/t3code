@@ -41,3 +41,22 @@ export function threadHasCaughtUpTo(
   if (write.sequence !== undefined && thread.sequence >= write.sequence) return true;
   return thread.messages?.some((entry) => entry.id === write.messageId) ?? false;
 }
+
+/**
+ * Backoff between bounded snapshot fetches while a thread that was just launched locally is
+ * still missing on the server. The first fetch is immediate, so this is at most 5 tries.
+ */
+export const MISSING_THREAD_RETRY_DELAYS_MILLIS: ReadonlyArray<number> = [250, 500, 1_000, 2_000];
+
+/**
+ * What a 404 from the bounded snapshot fetch means. It only proves the thread was deleted when
+ * this client has already seen it exist. Otherwise the launch command may still be in flight,
+ * so retry with backoff, then fall back to the socket instead of caching a false deletion.
+ */
+export function resolveMissingThreadSnapshot(input: {
+  readonly everLoaded: boolean;
+  readonly attempt: number;
+}): "deleted" | "retry" | "socket" {
+  if (input.everLoaded) return "deleted";
+  return input.attempt <= MISSING_THREAD_RETRY_DELAYS_MILLIS.length ? "retry" : "socket";
+}

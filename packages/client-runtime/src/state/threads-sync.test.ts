@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import type * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -54,6 +55,8 @@ import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
   makeEnvironmentThreadState,
   type EnvironmentThreadState,
+  MISSING_THREAD_RETRY_DELAYS_MILLIS,
+  resolveMissingThreadSnapshot,
   type ThreadSnapshotLoadResult,
 } from "./threads.ts";
 import * as ThreadSnapshotLoader from "./threadSnapshotHttp.ts";
@@ -112,6 +115,8 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     readonly latestLocalTurnOrdinal?: number | null;
   };
   readonly httpSnapshot?: ThreadSnapshotLoadResult;
+  /** Results returned in order, repeating the last one. Wins over `httpSnapshot`. */
+  readonly httpSnapshots?: ReadonlyArray<ThreadSnapshotLoadResult>;
   /** The test sends the completion marker itself instead of the fake server sending it first. */
   readonly completionMarker?: boolean;
   readonly resumeCache?: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]>;
@@ -178,13 +183,18 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   );
   const snapshotLoader = ThreadSnapshotLoader.ThreadSnapshotLoader.of({
     load: (_prepared, threadId) =>
-      Ref.update(loaderCalls, (count) => count + 1).pipe(
-        Effect.as(
-          threadId === THREAD_ID
-            ? (options?.httpSnapshot ??
-                ({ _tag: "unavailable" } satisfies ThreadSnapshotLoadResult))
-            : ({ _tag: "unavailable" } satisfies ThreadSnapshotLoadResult),
-        ),
+      Ref.updateAndGet(loaderCalls, (count) => count + 1).pipe(
+        Effect.map((count): ThreadSnapshotLoadResult => {
+          const unavailable = { _tag: "unavailable" } satisfies ThreadSnapshotLoadResult;
+          if (threadId !== THREAD_ID) return unavailable;
+          if (options?.httpSnapshots !== undefined) {
+            return (
+              options.httpSnapshots[Math.min(count, options.httpSnapshots.length) - 1] ??
+              unavailable
+            );
+          }
+          return options?.httpSnapshot ?? unavailable;
+        }),
       ),
   });
   const supervisor = EnvironmentSupervisor.EnvironmentSupervisor.of({
@@ -672,6 +682,106 @@ describe("EnvironmentThreads", () => {
       expect(yield* Ref.get(resumed.loaderCalls)).toBe(0);
     }),
   );
+
+  describe("bounded snapshot 404 (thread_not_found)", () => {
+    const present = (
+      title: string,
+    ): Extract<ThreadSnapshotLoadResult, { readonly _tag: "present" }> => ({
+      _tag: "present",
+      snapshot: {
+        snapshotSequence: 5,
+        projection: { ...BASE_PROJECTION, thread: { ...BASE_PROJECTION.thread, title } },
+      },
+    });
+
+    /** Waits for each fetch to start sleeping before advancing the clock past its backoff. */
+    const backOff = (
+      harness: { readonly loaderCalls: Ref.Ref<number> },
+      delays: ReadonlyArray<Duration.Input>,
+    ) =>
+      Effect.forEach(delays, (delay, index) =>
+        Ref.get(harness.loaderCalls).pipe(
+          Effect.repeat({ until: (count) => count > index }),
+          Effect.andThen(Effect.yieldNow),
+          Effect.andThen(TestClock.adjust(delay)),
+        ),
+      );
+
+    it.effect("retries a never-loaded thread instead of marking it deleted", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          httpSnapshots: [{ _tag: "missing" }, { _tag: "missing" }, present("Launched")],
+        });
+        yield* backOff(harness, ["250 millis", "500 millis"]);
+        const live = yield* awaitThreadState(
+          harness.observed,
+          (value) => Option.getOrNull(value.data)?.thread.title === "Launched",
+        );
+
+        expect(live.status).not.toBe("deleted");
+        expect(yield* Ref.get(harness.loaderCalls)).toBe(3);
+        expect(yield* Ref.get(harness.removedThreads)).toEqual([]);
+        expect((yield* Ref.get(harness.latest)).status).not.toBe("deleted");
+      }),
+    );
+
+    it.effect("falls back to the socket after five misses and never marks deleted", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ httpSnapshot: { _tag: "missing" } });
+        yield* backOff(harness, ["250 millis", "500 millis", "1 second", "2 seconds"]);
+        yield* SubscriptionRef.get(harness.subscriptionCount).pipe(
+          Effect.repeat({ until: (count) => count > 0 }),
+        );
+
+        expect(yield* Ref.get(harness.loaderCalls)).toBe(5);
+        expect((yield* Ref.get(harness.latest)).status).not.toBe("deleted");
+      }),
+    );
+
+    it.effect("ends live when the socket delivers the thread after a miss", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ httpSnapshot: { _tag: "missing" } });
+        yield* backOff(harness, ["250 millis", "500 millis", "1 second", "2 seconds"]);
+        yield* Queue.offer(harness.inputs, snapshot(BASE_PROJECTION, 6));
+        yield* Queue.offer(harness.inputs, titleUpdated("After miss", 7));
+        const live = yield* awaitThreadState(
+          harness.observed,
+          (value) =>
+            value.status === "live" && Option.getOrNull(value.data)?.thread.title === "After miss",
+        );
+
+        expect(live.status).toBe("live");
+      }),
+    );
+
+    it.effect("keeps deletion for a thread that was loaded and then deleted", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ cached: BASE_PROJECTION });
+        yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+        const update = deleted();
+        if (update.kind !== "event") return yield* Effect.die("Expected an event");
+        yield* Queue.offer(harness.inputs, { ...update, sequence: 8 });
+        yield* awaitThreadState(harness.observed, (value) => value.status === "deleted");
+      }),
+    );
+
+    it("treats a 404 as deleted only once the thread has been seen", () => {
+      expect(resolveMissingThreadSnapshot({ everLoaded: true, attempt: 1 })).toBe("deleted");
+      expect(resolveMissingThreadSnapshot({ everLoaded: false, attempt: 1 })).toBe("retry");
+      expect(
+        resolveMissingThreadSnapshot({
+          everLoaded: false,
+          attempt: MISSING_THREAD_RETRY_DELAYS_MILLIS.length,
+        }),
+      ).toBe("retry");
+      expect(
+        resolveMissingThreadSnapshot({
+          everLoaded: false,
+          attempt: MISSING_THREAD_RETRY_DELAYS_MILLIS.length + 1,
+        }),
+      ).toBe("socket");
+    });
+  });
 
   it.effect("resumes a warm cache via afterSequence without an HTTP fetch", () =>
     Effect.gen(function* () {

@@ -57,7 +57,8 @@ export const fetchEnvironmentBoundedThreadSnapshot = Effect.fn(
 });
 
 /**
- * A structured EnvironmentResourceNotFoundError means the thread is missing. Any other failure
+ * A structured EnvironmentResourceNotFoundError means the thread is missing right now, which is
+ * not proof of deletion: a just-launched thread may not exist yet. Any other failure
  * leaves the snapshot to the socket.
  */
 export const layer: Layer.Layer<
@@ -100,7 +101,7 @@ export const layer: Layer.Layer<
           Effect.catchTags({
             EnvironmentResourceNotFoundError: () =>
               Effect.logDebug(
-                "Bounded thread snapshot not found over HTTP; treating the thread as deleted.",
+                "Bounded thread snapshot not found over HTTP; the caller decides whether the thread is deleted.",
               ).pipe(
                 Effect.annotateLogs({ threadId }),
                 Effect.as({
