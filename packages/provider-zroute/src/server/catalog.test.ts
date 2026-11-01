@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  applyToolImageMode,
   mapCatalogToPiModels,
   preferredModelId,
   renderModelsJson,
@@ -86,6 +87,29 @@ describe("mapCatalogToPiModels", () => {
       "claude-sonnet-4-6",
     );
     expect(preferredModelId([])).toBeUndefined();
+  });
+});
+
+describe("applyToolImageMode", () => {
+  const models = mapCatalogToPiModels({
+    models: [
+      { id: "gemini-4-argon", input_modalities: ["text", "image"] },
+      { id: "grok-4.7", input_modalities: ["text"] },
+    ],
+  });
+
+  it("advertises text-only input in placeholder mode so tool images are not sent", () => {
+    expect(applyToolImageMode(models, "placeholder").map((model) => model.input)).toEqual([
+      ["text"],
+      ["text"],
+    ]);
+  });
+
+  it("keeps the catalog modalities in send mode", () => {
+    expect(applyToolImageMode(models, "send").map((model) => model.input)).toEqual([
+      ["text", "image"],
+      ["text"],
+    ]);
   });
 });
 
