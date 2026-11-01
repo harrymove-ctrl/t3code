@@ -141,6 +141,19 @@ function normalizeApiBase(apiBase: string): string {
   return apiBase.trim().replace(/\/+$/, "");
 }
 
+/**
+ * Pi only puts images into tool results when the model accepts image input. zroute currently
+ * tokenizes such images as base64 text (about 170k tokens each), so the placeholder mode
+ * advertises text-only input and Pi sends "(see attached image)" instead.
+ */
+export function applyToolImageMode(
+  models: ReadonlyArray<PiModelEntry>,
+  mode: "placeholder" | "send",
+): ReadonlyArray<PiModelEntry> {
+  if (mode === "send") return models;
+  return models.map((model) => ({ ...model, input: ["text"] as const }));
+}
+
 /** Default model: the first gemini-* in the catalog, else the first model. */
 export function preferredModelId(models: ReadonlyArray<PiModelEntry>): string | undefined {
   return (models.find((model) => model.id.startsWith("gemini-")) ?? models[0])?.id;

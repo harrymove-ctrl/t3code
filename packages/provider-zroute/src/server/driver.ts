@@ -14,6 +14,7 @@ import * as HttpClient from "effect/http/HttpClient";
 
 import { ZrouteSettings } from "../settings.ts";
 import {
+  applyToolImageMode,
   fetchZrouteCatalog,
   PI_AGENT_DIR_ENV,
   syncZrouteAgentDir,
@@ -49,7 +50,7 @@ export const ZrouteDriver: ProviderDriver<ZrouteSettings, ZrouteDriverEnv, Path.
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const httpClient = yield* HttpClient.HttpClient;
-    const { apiKey, apiBase } = input.config;
+    const { apiKey, apiBase, toolImages } = input.config;
     const agentDir = zrouteAgentDir(path, host.paths.baseDir, instanceDirName(input.instanceId));
 
     const wrapCheck: NonNullable<PiDriverOptions["wrapCheck"]> = Effect.fn("zroute.wrapCheck")(
@@ -89,7 +90,12 @@ export const ZrouteDriver: ProviderDriver<ZrouteSettings, ZrouteDriverEnv, Path.
           } satisfies ServerProviderDraft;
         }
 
-        yield* syncZrouteAgentDir({ agentDir, apiBase, apiKey, models: catalog.success }).pipe(
+        yield* syncZrouteAgentDir({
+          agentDir,
+          apiBase,
+          apiKey,
+          models: applyToolImageMode(catalog.success, toolImages),
+        }).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
         );
